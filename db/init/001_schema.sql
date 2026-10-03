@@ -55,3 +55,11 @@ CREATE TABLE IF NOT EXISTS subscribers (
     is_active TINYINT(1) NOT NULL DEFAULT 1,
     subscribed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+-- ADDED: shared PHP sessions must live outside the Vercel container.
+CREATE TABLE IF NOT EXISTS sessions (
+    session_id VARCHAR(128) PRIMARY KEY,
+    session_data MEDIUMTEXT NOT NULL,
+    expires_at DATETIME NOT NULL,
+    INDEX idx_sessions_expires_at (expires_at)
+);

@@ -22,9 +22,6 @@ RUN composer install \
     --prefer-dist \
     --optimize-autoloader
 
-RUN printf 'session.save_path="/tmp"\n' \
-    > /usr/local/etc/php/conf.d/vercel-session.ini
-
 EXPOSE 80
 
 # KEEP: this exact startup command is known to deploy successfully.
