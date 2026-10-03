@@ -11,7 +11,7 @@ return [
     'smtp_email' => getenv('SMTP_EMAIL') ?: '',
 
     // CHANGED: Gmail App Password stored securely in Vercel.
-    'smtp_password' => getenv('SMTP_PASSWORD') ?: '',
+    'smtp_password' => getenv('SMTP_PASS') ?: '',
 
     // CHANGED: sender address is now deployment-configurable.
     'smtp_from_email' => getenv('SMTP_FROM_EMAIL')
