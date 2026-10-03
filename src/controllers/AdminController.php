@@ -192,6 +192,50 @@ class AdminController
 
 
 
+    /* Generate a short-lived token for a direct browser-to-Blob upload. */
+    public function blobToken(): void
+    {
+        // ADDED: only authenticated administrators may request upload tokens.
+        if ($this->requireAdmin() !== null) {
+            $this->jsonResponse([
+                'success' => false,
+                'message' => 'Unauthorized'
+            ], 403);
+        }
+
+        // ADDED: token creation is a POST-only operation.
+        if (($_SERVER['REQUEST_METHOD'] ?? 'GET') !== 'POST') {
+            $this->jsonResponse([
+                'success' => false,
+                'message' => 'Method not allowed'
+            ], 405);
+        }
+
+        // ADDED: the request is tiny JSON; the image itself never reaches PHP.
+        $body = json_decode(file_get_contents('php://input') ?: '', true);
+        $contentType = trim((string) ($body['contentType'] ?? ''));
+
+        try {
+            $upload = $this->blobStorage->createClientUploadToken($contentType);
+
+            $this->jsonResponse([
+                'success' => true,
+                'clientToken' => $upload['clientToken'],
+                'pathname' => $upload['pathname'],
+                'storeId' => $upload['storeId']
+            ]);
+        } catch (\RuntimeException $e) {
+            // ADDED: keep detailed configuration errors in Vercel logs.
+            error_log('Blob client token failed: ' . $e->getMessage());
+
+            $this->jsonResponse([
+                'success' => false,
+                'message' => 'Image upload could not be prepared.'
+            ], 500);
+        }
+    }
+
+
     /* Render the create event form for administrators */
 
     public function create(): ?array
@@ -218,7 +262,7 @@ class AdminController
 
             'styles' => ['admin-form.css'],
 
-            'scripts' => ['createEvent.js'],
+            'scripts' => ['blobUpload.js', 'createEvent.js'],
 
             'variables' => []
 
@@ -274,16 +318,19 @@ class AdminController
 
         /* Handle optional image upload */
 
-        // CHANGED: store uploaded images in persistent Vercel Blob storage
-        // instead of the container filesystem.
-        if (!empty($_FILES['image']['name'])) {
-            try {
-                $imagePath = $this->blobStorage->uploadEventImage(
-                    $_FILES['image']
-                );
-            } catch (\RuntimeException $e) {
-                return $this->storeError($e->getMessage());
+        // CHANGED: the browser uploads the image directly to Vercel Blob.
+        // PHP now receives only the small permanent Blob URL, avoiding
+        // Vercel's Function request-body limit for multipart image uploads.
+        $imageUrl = trim($_POST['image_url'] ?? '');
+
+        if ($imageUrl !== '') {
+            // ADDED: never trust a URL supplied by the browser without
+            // confirming that it belongs to this project's public Blob store.
+            if (!$this->blobStorage->isValidPublicBlobUrl($imageUrl)) {
+                return $this->storeError('Uploaded image URL is invalid.');
             }
+
+            $imagePath = $imageUrl;
         }
 
 
@@ -439,7 +486,7 @@ class AdminController
 
             'styles' => ['admin-form.css'],
 
-            'scripts' => ['editEvent.js'],
+            'scripts' => ['blobUpload.js', 'editEvent.js'],
 
             'variables' => [
 
@@ -543,25 +590,33 @@ class AdminController
 
         /* Handle optional replacement image upload */
 
-        // CHANGED: upload a replacement image to persistent Vercel Blob storage.
-        // If no new file is selected, keep the existing image URL.
-        if (!empty($_FILES['image']['name'])) {
-            try {
-                $imagePath = $this->blobStorage->uploadEventImage(
-                    $_FILES['image']
-                );
-            } catch (\RuntimeException $e) {
+        // CHANGED: a replacement image is uploaded directly from the
+        // browser to Vercel Blob. The form sends only the returned URL.
+        $imageUrl = trim($_POST['image_url'] ?? '');
+
+        if ($imageUrl !== '') {
+            // ADDED: accept only URLs belonging to this project's Blob store.
+            if (!$this->blobStorage->isValidPublicBlobUrl($imageUrl)) {
+                if ($this->isAjaxRequest()) {
+                    $this->jsonResponse([
+                        'success' => false,
+                        'message' => 'Uploaded image URL is invalid.'
+                    ], 422);
+                }
+
                 return [
                     'title' => 'Edit Event',
                     'template' => 'editEvent.html.php',
                     'styles' => ['admin-form.css'],
-                    'scripts' => ['editEvent.js'],
+                    'scripts' => ['blobUpload.js', 'editEvent.js'],
                     'variables' => [
                         'event' => $existingEvent,
-                        'error' => $e->getMessage()
+                        'error' => 'Uploaded image URL is invalid.'
                     ]
                 ];
             }
+
+            $imagePath = $imageUrl;
         }
 
 
@@ -733,7 +788,7 @@ class AdminController
 
             'styles' => ['admin-form.css'],
 
-            'scripts' => ['createEvent.js'],
+            'scripts' => ['blobUpload.js', 'createEvent.js'],
 
             'variables' => [
 

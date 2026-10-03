@@ -5,181 +5,169 @@ namespace framework;
 /**
  * BlobStorage
  *
- * Vercel-only storage service for persistent public event images.
+ * Generates short-lived client upload tokens for Vercel Blob and validates
+ * the public Blob URLs returned by direct browser uploads.
  */
 class BlobStorage
 {
-    // ADDED: Current Vercel Blob API endpoint used by the official SDK.
-    private const API_URL = 'https://vercel.com/api/blob/';
-
-    // ADDED: Keep this in sync with Vercel Blob's current API version.
-    private const API_VERSION = '12';
-
-    // ADDED: Existing project rule: event images must stay below 2 MB.
+    // ADDED: keep the application rule that event images are at most 2 MB.
     private const MAX_IMAGE_SIZE = 2 * 1024 * 1024;
 
+    // ADDED: only these image types are accepted for event uploads.
+    private const ALLOWED_IMAGE_TYPES = [
+        'image/jpeg' => 'jpg',
+        'image/png' => 'png',
+        'image/webp' => 'webp',
+    ];
+
     /**
-     * Upload an event image to a PUBLIC Vercel Blob store.
+     * Create a short-lived Vercel Blob client token for one exact image path.
      *
-     * @param array $file One entry from PHP's $_FILES array.
-     * @return string Permanent public Blob URL to store in events.image_path.
+     * The long-lived read/write token never leaves the PHP server. The browser
+     * receives only a tightly scoped client token that can upload one image.
      */
-    public function uploadEventImage(array $file): string
+    public function createClientUploadToken(string $contentType): array
     {
-        // ADDED: Reject PHP-level upload failures before touching Blob storage.
-        if (($file['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK) {
-            throw new \RuntimeException('Image upload failed. Please try again.');
-        }
-
-        $tmpPath = $file['tmp_name'] ?? '';
-
-        // ADDED: Confirm PHP actually created the temporary uploaded file.
-        if ($tmpPath === '' || !is_uploaded_file($tmpPath)) {
-            throw new \RuntimeException('Image upload failed. Please try again.');
-        }
-
-        // ADDED: Preserve the assignment's existing 2 MB upload limit.
-        if (($file['size'] ?? 0) > self::MAX_IMAGE_SIZE) {
-            throw new \RuntimeException('Image must be smaller than 2MB.');
-        }
-
-        // ADDED: Detect MIME from file contents rather than trusting the browser.
-        $mimeType = mime_content_type($tmpPath);
-
-        $allowedTypes = [
-            'image/jpeg' => 'jpg',
-            'image/png' => 'png',
-            'image/webp' => 'webp',
-        ];
-
-        // ADDED: Preserve the existing JPG / PNG / WEBP allow-list.
-        if (!isset($allowedTypes[$mimeType])) {
+        // ADDED: validate MIME type before issuing any upload permission.
+        if (!isset(self::ALLOWED_IMAGE_TYPES[$contentType])) {
             throw new \RuntimeException(
-                'Please upload a valid image file: JPG, PNG or WEBP.'
+                'Unsupported image type. Only JPG, PNG and WEBP are allowed.'
             );
         }
 
-        $extension = $allowedTypes[$mimeType];
+        // ADDED: Vercel's client-token signing flow requires a read/write token.
+        // Keep this value server-side in Vercel Environment Variables only.
+        $readWriteToken = trim((string) getenv('BLOB_READ_WRITE_TOKEN'));
 
-        // ADDED: Use a server-generated pathname; never trust the user's filename.
-        $pathname = 'events/event_' . bin2hex(random_bytes(10)) . '.' . $extension;
-
-        // ADDED: Read the temporary upload while the current request is active.
-        $contents = file_get_contents($tmpPath);
-
-        if ($contents === false) {
-            throw new \RuntimeException('Image upload failed. Please try again.');
+        if ($readWriteToken === '') {
+            throw new \RuntimeException(
+                'BLOB_READ_WRITE_TOKEN is not configured.'
+            );
         }
 
-        return $this->putPublicBlob($pathname, $contents, $mimeType);
+        $storeId = $this->storeIdFromReadWriteToken($readWriteToken);
+        $extension = self::ALLOWED_IMAGE_TYPES[$contentType];
+
+        // ADDED: generate the destination on the server so the client cannot
+        // request arbitrary Blob paths.
+        $pathname = 'events/event_' . bin2hex(random_bytes(12)) . '.' . $extension;
+
+        // ADDED: constrain the token to one exact path, one MIME type and 2 MB.
+        // validUntil is milliseconds since Unix epoch, matching Vercel Blob.
+        $payload = [
+            'pathname' => $pathname,
+            'allowedContentTypes' => [$contentType],
+            'maximumSizeInBytes' => self::MAX_IMAGE_SIZE,
+            'validUntil' => (int) floor(microtime(true) * 1000) + (5 * 60 * 1000),
+            'addRandomSuffix' => false,
+            'allowOverwrite' => false,
+        ];
+
+        $json = json_encode($payload, JSON_UNESCAPED_SLASHES);
+
+        if ($json === false) {
+            throw new \RuntimeException('Could not encode Blob token payload.');
+        }
+
+        // ADDED: this mirrors Vercel Blob's current client-token format:
+        // HMAC-SHA256(base64(payload), BLOB_READ_WRITE_TOKEN).
+        $encodedPayload = base64_encode($json);
+        $signature = hash_hmac('sha256', $encodedPayload, $readWriteToken);
+        $securedPayload = base64_encode($signature . '.' . $encodedPayload);
+
+        return [
+            'clientToken' => 'vercel_blob_client_' . $storeId . '_' . $securedPayload,
+            'pathname' => $pathname,
+            'storeId' => $storeId,
+        ];
     }
 
     /**
-     * Send raw bytes to Vercel Blob.
+     * Confirm that a URL returned by the browser belongs to this Blob store.
      */
-    private function putPublicBlob(
-        string $pathname,
-        string $contents,
-        string $contentType
-    ): string {
-        // ADDED: Prefer the read/write token when Vercel exposes it.
+    public function isValidPublicBlobUrl(string $url): bool
+    {
+        // ADDED: reject malformed or non-HTTPS URLs.
+        if (!filter_var($url, FILTER_VALIDATE_URL)) {
+            return false;
+        }
+
+        $scheme = strtolower((string) parse_url($url, PHP_URL_SCHEME));
+        $host = strtolower((string) parse_url($url, PHP_URL_HOST));
+        $path = (string) parse_url($url, PHP_URL_PATH);
+
+        if ($scheme !== 'https') {
+            return false;
+        }
+
+        // ADDED: resolve the same store ID used to issue the upload token.
+        $storeId = $this->getConfiguredStoreId();
+
+        if ($storeId === null) {
+            return false;
+        }
+
+        $expectedHost = strtolower(
+            $storeId . '.public.blob.vercel-storage.com'
+        );
+
+        // ADDED: only URLs from this project's public Blob store are accepted.
+        if ($host !== $expectedHost) {
+            return false;
+        }
+
+        // ADDED: event images must remain inside the events/ namespace.
+        if (!str_starts_with($path, '/events/')) {
+            return false;
+        }
+
+        // ADDED: keep URL validation aligned with the accepted image formats.
+        return (bool) preg_match('/\.(?:jpg|png|webp)$/i', $path);
+    }
+
+    /**
+     * Extract the Blob store ID from a Vercel read/write token.
+     */
+    private function storeIdFromReadWriteToken(string $token): string
+    {
+        // ADDED: current token shape is vercel_blob_rw_<storeId>_<secret>.
+        $parts = explode('_', $token);
+        $storeId = $parts[3] ?? '';
+
+        if ($storeId === '') {
+            throw new \RuntimeException('BLOB_READ_WRITE_TOKEN is invalid.');
+        }
+
+        return $storeId;
+    }
+
+    /**
+     * Resolve the store ID for validating a returned public Blob URL.
+     */
+    private function getConfiguredStoreId(): ?string
+    {
         $readWriteToken = trim((string) getenv('BLOB_READ_WRITE_TOKEN'));
 
-        // ADDED: Newer Blob stores can use Vercel's short-lived OIDC token.
-        $oidcToken = trim((string) getenv('VERCEL_OIDC_TOKEN'));
+        if ($readWriteToken !== '') {
+            try {
+                return $this->storeIdFromReadWriteToken($readWriteToken);
+            } catch (\RuntimeException) {
+                return null;
+            }
+        }
+
+        // ADDED: fallback is useful for validation when BLOB_STORE_ID exists.
         $storeId = trim((string) getenv('BLOB_STORE_ID'));
 
-        if ($readWriteToken !== '') {
-            $token = $readWriteToken;
-
-            // ADDED: Read/write tokens encode the store ID as:
-            // vercel_blob_rw_<storeId>_<secret...>
-            $parts = explode('_', $readWriteToken);
-            $storeId = $parts[3] ?? $storeId;
-        } elseif ($oidcToken !== '' && $storeId !== '') {
-            $token = $oidcToken;
-
-            // ADDED: Vercel may expose BLOB_STORE_ID as "store_<id>".
-            if (str_starts_with($storeId, 'store_')) {
-                $storeId = substr($storeId, strlen('store_'));
-            }
-        } else {
-            error_log('Vercel Blob credentials are not configured.');
-
-            throw new \RuntimeException(
-                'Image upload failed. Please try again.'
-            );
+        if ($storeId === '') {
+            return null;
         }
 
-        // ADDED: Match the request shape used by Vercel's official Blob SDK.
-        $requestId = $storeId
-            . ':'
-            . (int) (microtime(true) * 1000)
-            . ':'
-            . bin2hex(random_bytes(6));
-
-        $headers = [
-            'Authorization: Bearer ' . $token,
-            'Content-Type: application/octet-stream',
-            'Content-Length: ' . strlen($contents),
-            'x-api-version: ' . self::API_VERSION,
-            'x-api-blob-request-id: ' . $requestId,
-            'x-api-blob-request-attempt: 0',
-            'x-vercel-blob-store-id: ' . $storeId,
-            'x-vercel-blob-access: public',
-            'x-add-random-suffix: 1',
-            'x-content-type: ' . $contentType,
-        ];
-
-        $url = self::API_URL . '?pathname=' . rawurlencode($pathname);
-
-        // ADDED: PHP's HTTP stream keeps Dockerfile.vercel unchanged;
-        // no cURL extension or Node.js runtime is required.
-        $context = stream_context_create([
-            'http' => [
-                'method' => 'PUT',
-                'header' => implode("\r\n", $headers),
-                'content' => $contents,
-                'ignore_errors' => true,
-                'timeout' => 30,
-            ],
-        ]);
-
-        $response = @file_get_contents($url, false, $context);
-
-        // ADDED: Parse the HTTP status returned by Blob.
-        $statusCode = 0;
-        if (!empty($http_response_header[0])
-            && preg_match('/\s(\d{3})\s/', $http_response_header[0], $matches)
-        ) {
-            $statusCode = (int) $matches[1];
+        // ADDED: Vercel may expose this value as store_<id>.
+        if (str_starts_with($storeId, 'store_')) {
+            $storeId = substr($storeId, strlen('store_'));
         }
 
-        if ($response === false || $statusCode < 200 || $statusCode >= 300) {
-            // ADDED: Log diagnostics server-side without exposing credentials.
-            error_log(
-                'Vercel Blob upload failed. HTTP '
-                . $statusCode
-                . ' Response: '
-                . ($response ?: 'no response body')
-            );
-
-            throw new \RuntimeException(
-                'Image upload failed. Please try again.'
-            );
-        }
-
-        $data = json_decode($response, true);
-
-        // ADDED: Vercel Blob returns the permanent public URL in "url".
-        if (!is_array($data) || empty($data['url'])) {
-            error_log('Vercel Blob upload returned an invalid response.');
-
-            throw new \RuntimeException(
-                'Image upload failed. Please try again.'
-            );
-        }
-
-        return (string) $data['url'];
+        return $storeId !== '' ? $storeId : null;
     }
 }
