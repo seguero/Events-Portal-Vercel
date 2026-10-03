@@ -1,11 +1,38 @@
-# CHANGED: minimal image purely to test Vercel's container deployment.
+# CHANGED: keep the same base image that already proved it deploys on Vercel.
 FROM php:8.2-apache
 
-# ADDED: create a page without involving your application, Composer or MySQL.
-RUN echo '<?php echo "Vercel PHP container works"; ?>' > /var/www/html/index.php
+# ADDED: your MVC routes rely on Apache rewrite rules.
+RUN a2enmod rewrite
 
-# ADDED: Vercel defaults container HTTP traffic to port 80.
+# ADDED: allow the existing .htaccess rules inside /var/www/html.
+RUN sed -i 's/AllowOverride None/AllowOverride All/g' \
+    /etc/apache2/apache2.conf
+
+# ADDED: install only PDO MySQL.
+# mysqli, cron, zip and the previous runtime setup are intentionally omitted.
+RUN docker-php-ext-install pdo_mysql
+
+# ADDED: copy Composer from the official Composer image.
+COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
+
+# ADDED: deploy the actual PHP application instead of the smoke-test page.
+WORKDIR /var/www/html
+COPY ./src/ /var/www/html/
+
+# ADDED: install only production Composer packages.
+RUN composer install \
+    --no-dev \
+    --no-interaction \
+    --prefer-dist \
+    --optimize-autoloader
+
+# ADDED: use Vercel's writable /tmp directory for PHP sessions.
+# No custom directory creation or chown is necessary.
+RUN printf 'session.save_path="/tmp"\n' \
+    > /usr/local/etc/php/conf.d/vercel-session.ini
+
+# ADDED: Vercel container traffic defaults to port 80.
 EXPOSE 80
 
-# ADDED: start Apache directly.
+# CHANGED: keep startup identical to the smoke test that already worked.
 CMD ["apache2-foreground"]
