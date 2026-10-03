@@ -1,38 +1,42 @@
-# CHANGED: keep the same base image that already proved it deploys on Vercel.
+# KEEP: same base image that already deployed successfully in the smoke test.
 FROM php:8.2-apache
 
-# ADDED: your MVC routes rely on Apache rewrite rules.
+# ADDED: your MVC routing relies on Apache mod_rewrite.
 RUN a2enmod rewrite
 
-# ADDED: allow the existing .htaccess rules inside /var/www/html.
+# ADDED: allow your existing .htaccess routing rules.
 RUN sed -i 's/AllowOverride None/AllowOverride All/g' \
     /etc/apache2/apache2.conf
 
-# ADDED: install only PDO MySQL.
-# mysqli, cron, zip and the previous runtime setup are intentionally omitted.
+# ADDED: Composer downloads PHPMailer as a ZIP archive,
+# so the container needs unzip during the image build.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends unzip \
+    && rm -rf /var/lib/apt/lists/*
+
+# ADDED: your application's database layer uses PDO with MySQL.
 RUN docker-php-ext-install pdo_mysql
 
 # ADDED: copy Composer from the official Composer image.
 COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
 
-# ADDED: deploy the actual PHP application instead of the smoke-test page.
+# ADDED: copy the real application into the deployment image.
 WORKDIR /var/www/html
 COPY ./src/ /var/www/html/
 
-# ADDED: install only production Composer packages.
+# ADDED: install production PHP dependencies.
 RUN composer install \
     --no-dev \
     --no-interaction \
     --prefer-dist \
     --optimize-autoloader
 
-# ADDED: use Vercel's writable /tmp directory for PHP sessions.
-# No custom directory creation or chown is necessary.
+# ADDED: Vercel provides /tmp as writable runtime storage.
 RUN printf 'session.save_path="/tmp"\n' \
     > /usr/local/etc/php/conf.d/vercel-session.ini
 
-# ADDED: Vercel container traffic defaults to port 80.
+# ADDED: Apache listens on the port Vercel expects.
 EXPOSE 80
 
-# CHANGED: keep startup identical to the smoke test that already worked.
+# KEEP: same startup command that worked in the smoke test.
 CMD ["apache2-foreground"]
