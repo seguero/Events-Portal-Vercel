@@ -1,4 +1,5 @@
 <?php
+
 namespace framework;
 
 use PDO;
@@ -7,65 +8,59 @@ use PDOException;
 /*
  * Database
  *
- * Provides a centralized PDO connection using the Singleton pattern.
- * Responsibilities:
- * - Establish a single shared database connection
- * - Configure PDO error handling and fetch mode
- * - Prevent multiple unnecessary connections per request
- *
- * This class ensures consistent database access across controllers.
+ * VERCEL DEMO VERSION:
+ * - Reads connection details injected by the TiDB Cloud Vercel integration.
+ * - Uses TLS for the public TiDB Cloud Starter connection.
+ * - Keeps the same Singleton-style API used by the rest of the application.
  */
 class Database
 {
-    /*
-     * Holds the single PDO instance (shared connection).
-     */
     private static ?PDO $connection = null;
 
-    /*
-     * Returns a PDO connection instance.
-     * If no connection exists yet, it creates one.
-     * Subsequent calls reuse the same connection.
-     * @return PDO
-     */
     public static function getConnection(): PDO
     {
-        // Create connection only once (lazy initialization)
         if (self::$connection === null) {
+            // CHANGED: Vercel/TiDB deployment uses environment variables instead
+            // of the Docker Compose hostname and hard-coded local credentials.
+            $host = getenv('TIDB_HOST');
+            $port = getenv('TIDB_PORT') ?: '4000';
+            $db = getenv('TIDB_DATABASE');
+            $user = getenv('TIDB_USER');
+            $pass = getenv('TIDB_PASSWORD');
 
-            // Database credentials (must match docker-compose configuration)
-            $host = 'db';                // Docker service name
-            $db   = 'csym019_db';        // Database name
-            $user = 'csym019_user';      // Database username
-            $pass = 'csym019_pass';      // Database password
+            // ADDED: Fail clearly when the database integration is not configured.
+            if (!$host || !$db || !$user || !$pass) {
+                throw new \RuntimeException(
+                    'Database environment variables are not configured.'
+                );
+            }
+
+            // ADDED: TiDB Cloud Starter requires TLS on its public endpoint.
+            $options = [
+                PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+                PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+                PDO::ATTR_EMULATE_PREPARES => false,
+                PDO::MYSQL_ATTR_SSL_CA => '/etc/ssl/certs/ca-certificates.crt',
+                PDO::MYSQL_ATTR_SSL_VERIFY_SERVER_CERT => true,
+            ];
 
             try {
-                // Create PDO connection using MySQL driver
+                // CHANGED: Host, port, database and credentials now come from
+                // the deployment environment rather than Docker Compose.
                 self::$connection = new PDO(
-                    "mysql:host=$host;dbname=$db;charset=utf8mb4",
+                    "mysql:host={$host};port={$port};dbname={$db};charset=utf8mb4",
                     $user,
-                    $pass
+                    $pass,
+                    $options
                 );
-
-                // Throw exceptions on database errors (improves debugging + security)
-                self::$connection->setAttribute(
-                    PDO::ATTR_ERRMODE,
-                    PDO::ERRMODE_EXCEPTION
-                );
-
-                // Set default fetch mode to associative array
-                self::$connection->setAttribute(
-                    PDO::ATTR_DEFAULT_FETCH_MODE,
-                    PDO::FETCH_ASSOC
-                );
-
             } catch (PDOException $e) {
-                // Stop execution if connection fails
-                die('Database connection failed: ' . $e->getMessage());
+                // CHANGED: Log the detailed error server-side without exposing
+                // database details to a visitor.
+                error_log('Database connection failed: ' . $e->getMessage());
+                throw new \RuntimeException('Database connection failed.');
             }
         }
 
-        // Return existing or newly created connection
         return self::$connection;
     }
 }

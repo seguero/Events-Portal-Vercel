@@ -1,0 +1,50 @@
+# VERCEL-ONLY DEPLOYMENT IMAGE
+# ADDED: This repo is deployed as one HTTP container on Vercel.
+FROM php:8.2-apache
+
+# ADDED: Your custom MVC routing relies on Apache mod_rewrite.
+RUN a2enmod rewrite
+
+# ADDED: Allow the existing .htaccess file inside /var/www/html to control rewrites.
+RUN sed -i 's/AllowOverride None/AllowOverride All/g' /etc/apache2/apache2.conf
+
+# CHANGED: Install only packages required by the public demo.
+# Cron/phpMyAdmin/MySQL server are intentionally NOT part of this image.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        unzip \
+    && docker-php-ext-install pdo_mysql mysqli \
+    && rm -rf /var/lib/apt/lists/*
+
+# ADDED: Composer is used at build time so vendor/ is baked into the image.
+COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
+
+# ADDED: The Vercel image contains the application source itself.
+# This replaces the ./src:/var/www/html bind mount used by Docker Compose locally.
+WORKDIR /var/www/html
+COPY ./src/ /var/www/html/
+
+# ADDED: Install production PHP dependencies in the image.
+RUN composer install \
+    --no-dev \
+    --no-interaction \
+    --prefer-dist \
+    --optimize-autoloader
+
+# ADDED: Vercel Functions are stateless. PHP sessions use /tmp for the live demo.
+RUN printf 'session.save_path="/tmp/php-sessions"\n' \
+    > /usr/local/etc/php/conf.d/vercel-session.ini
+
+# ADDED: Keep the existing upload path working without changing PHP code.
+# The target is /tmp, so uploads are deliberately ephemeral in the demo.
+RUN mkdir -p /var/www/html/assets/uploads \
+    && rm -rf /var/www/html/assets/uploads/events \
+    && ln -s /tmp/event-uploads /var/www/html/assets/uploads/events
+
+# ADDED: Vercel container functions use HTTP port 80 by default.
+EXPOSE 80
+
+# CHANGED: No cron entrypoint. Create only the temporary runtime directories,
+# then launch Apache as the single HTTP process Vercel expects.
+CMD ["sh", "-c", "mkdir -p /tmp/php-sessions /tmp/event-uploads && chown -R www-data:www-data /tmp/php-sessions /tmp/event-uploads && exec apache2-foreground"]

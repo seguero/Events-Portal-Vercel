@@ -1,0 +1,23 @@
+# ADDED: Keep deployment builds small and deterministic.
+.git
+.github
+.vscode
+.idea
+
+# Local-only Docker setup is not part of the Vercel image.
+compose.yaml
+docker-compose.yml
+Dockerfile
+docker-entrypoint.sh
+crontab
+
+# Documentation and local database bootstrap files are not required inside the web image.
+docs/
+db/
+*.docx
+
+# ADDED: Composer dependencies are rebuilt inside Dockerfile.vercel.
+src/vendor/
+
+# ADDED: PHPUnit is not installed in the production image.
+src/tests/

@@ -1,8 +1,0 @@
-# Use /bin/sh for execution
-SHELL=/bin/sh
-
-# Ensure required binaries are available
-PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-
-# Runs every minute for demo purposes (would be hourly in production)
-* * * * * root php /var/www/html/scripts/send-reminders.php >> /var/log/cron.log 2>&1
