@@ -1,4 +1,3 @@
-# KEEP: same base image that already deployed successfully in the smoke test.
 FROM php:8.2-apache
 
 # ADDED: your MVC routing relies on Apache mod_rewrite.
@@ -8,8 +7,7 @@ RUN a2enmod rewrite
 RUN sed -i 's/AllowOverride None/AllowOverride All/g' \
     /etc/apache2/apache2.conf
 
-# ADDED: Composer downloads PHPMailer as a ZIP archive,
-# so the container needs unzip during the image build.
+# ADDED: Composer needs unzip to install PHPMailer.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends unzip \
     && rm -rf /var/lib/apt/lists/*
@@ -20,8 +18,9 @@ RUN docker-php-ext-install pdo_mysql
 # ADDED: copy Composer from the official Composer image.
 COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
 
-# ADDED: copy the real application into the deployment image.
 WORKDIR /var/www/html
+
+# ADDED: copy the application into the Vercel image.
 COPY ./src/ /var/www/html/
 
 # ADDED: install production PHP dependencies.
@@ -31,12 +30,23 @@ RUN composer install \
     --prefer-dist \
     --optimize-autoloader
 
-# ADDED: Vercel provides /tmp as writable runtime storage.
+# ADDED: store PHP sessions in Vercel's writable temporary filesystem.
 RUN printf 'session.save_path="/tmp"\n' \
     > /usr/local/etc/php/conf.d/vercel-session.ini
 
-# ADDED: Apache listens on the port Vercel expects.
+
+# ============================================================
+# VERCEL TEMPORARY EVENT UPLOADS
+# ============================================================
+
+# ADDED: replace the normal event upload directory with a symlink
+# pointing to Vercel's writable /tmp filesystem.
+RUN rm -rf /var/www/html/assets/uploads/events \
+    && ln -s /tmp/event-uploads /var/www/html/assets/uploads/events
+
+
 EXPOSE 80
 
-# KEEP: same startup command that worked in the smoke test.
-CMD ["apache2-foreground"]
+# CHANGED: create the temporary upload directory whenever a new
+# Vercel container starts, then launch Apache normally.
+CMD ["sh", "-c", "mkdir -p /tmp/event-uploads && chmod 0777 /tmp/event-uploads && exec apache2-foreground"]
